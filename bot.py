@@ -1,32 +1,28 @@
 import re
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    filters,
+    filters
 )
 
-# ===== SETTINGS =====
+# ---------------- CONFIG ----------------
 
-BOT_TOKEN = "8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ"
-ADMIN_ID = 7662708655
+BOT_TOKEN = os.getenv("8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ")
+ADMIN_ID = int(os.getenv("7662708655"))
 
-SUPPORT_URL = "https://t.me/Ark456781"
+QR_FILE = "Screenshot_20260224_224442.jpg"
 
-QR_PATH = "qr.jpg"
-
-UTR_FILE = "utrs.txt"
+SUPPORT_USERNAME = "@Ark456781"
 
 MAX_UTR_ATTEMPTS = 5
 
-# ====================
-
-logging.basicConfig(level=logging.INFO)
+# ---------------- DATA ----------------
 
 coupon_db = {
     "500": {
@@ -38,43 +34,30 @@ coupon_db = {
     }
 }
 
-pending = {}
-utr_wait = {}
+pending_orders = {}
 utr_attempts = {}
-custom_wait = {}
+utr_waiting = {}
 used_utrs = set()
 
-# ===== LOAD UTR =====
-
-if os.path.exists(UTR_FILE):
-    with open(UTR_FILE) as f:
-        used_utrs = set(line.strip() for line in f)
-
-def save_utr(utr):
-    with open(UTR_FILE,"a") as f:
-        f.write(utr+"\n")
-
-# ===== START =====
+# ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user = update.message.chat_id
+    user = update.effective_chat.id
 
-    pending.pop(user,None)
-    utr_wait.pop(user,None)
+    utr_waiting[user] = False
 
-    text="Available Coupons:\n\n"
+    text = "⚠ Coupon apne risk par lein\nSabse kam price par available\n\n"
 
-    keyboard=[]
+    keyboard = []
 
-    for value,data in coupon_db.items():
+    for value, data in coupon_db.items():
 
-        stock=len(data["coupons"])
+        stock = len(data["coupons"])
 
-        text+=f"{value} OFF\nPrice ₹{data['price']}\nStock {stock}\n\n"
+        text += f"{value} OFF\nPrice ₹{data['price']}\nStock {stock}\n\n"
 
-        if stock>0:
-
+        if stock > 0:
             keyboard.append([
                 InlineKeyboardButton(
                     f"Buy {value}",
@@ -83,7 +66,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
 
     keyboard.append([
-        InlineKeyboardButton("Support",url=SUPPORT_URL)
+        InlineKeyboardButton("Support", url=f"https://t.me/{SUPPORT_USERNAME.replace('@','')}")
     ])
 
     await update.message.reply_text(
@@ -91,238 +74,231 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ===== BUY =====
+# ---------------- BUY ----------------
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
+    query = update.callback_query
     await query.answer()
 
-    value=query.data.split("_")[1]
+    value = query.data.split("_")[1]
 
-    keyboard=[
+    keyboard = [
 
-        [
-            InlineKeyboardButton("1",callback_data=f"qty_{value}_1"),
-            InlineKeyboardButton("2",callback_data=f"qty_{value}_2")
-        ],
+        [InlineKeyboardButton("1", callback_data=f"qty_{value}_1")],
+        [InlineKeyboardButton("2", callback_data=f"qty_{value}_2")],
+        [InlineKeyboardButton("3", callback_data=f"qty_{value}_3")],
+        [InlineKeyboardButton("5", callback_data=f"qty_{value}_5")],
 
-        [
-            InlineKeyboardButton("3",callback_data=f"qty_{value}_3"),
-            InlineKeyboardButton("5",callback_data=f"qty_{value}_5")
-        ],
+        [InlineKeyboardButton("Cancel Order", callback_data="cancel")],
 
-        [
-            InlineKeyboardButton("Custom",callback_data=f"custom_{value}")
-        ],
-
-        [
-            InlineKeyboardButton("Cancel",callback_data="cancel")
-        ],
-
-        [
-            InlineKeyboardButton("Support",url=SUPPORT_URL)
-        ]
+        [InlineKeyboardButton("Support", url=f"https://t.me/{SUPPORT_USERNAME.replace('@','')}")]
 
     ]
 
     await query.message.reply_text(
-        "Select quantity",
+        "Select quantity:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ===== PROCESS QTY =====
-
-async def process_qty(user,value,qty,context):
-
-    total=coupon_db[value]["price"]*qty
-
-    pending[user]={
-        "value":value,
-        "qty":qty
-    }
-
-    utr_attempts[user]=0
-
-    with open(QR_PATH,"rb") as photo:
-
-        await context.bot.send_photo(
-
-            user,
-            photo,
-
-            caption=f"Pay ₹{total}\nClick Paid after payment",
-
-            reply_markup=InlineKeyboardMarkup([
-
-                [InlineKeyboardButton("Paid",callback_data=f"paid_{user}")],
-
-                [InlineKeyboardButton("Cancel",callback_data="cancel")],
-
-                [InlineKeyboardButton("Support",url=SUPPORT_URL)]
-
-            ])
-
-        )
-
-# ===== QTY =====
+# ---------------- QTY ----------------
 
 async def qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
+    query = update.callback_query
     await query.answer()
 
-    value,qty=query.data.split("_")[1:]
+    _, value, qty = query.data.split("_")
 
-    await process_qty(
-        query.message.chat_id,
-        value,
-        int(qty),
-        context
+    qty = int(qty)
+
+    total = coupon_db[value]["price"] * qty
+
+    user = query.message.chat_id
+
+    pending_orders[user] = {
+
+        "value": value,
+        "qty": qty
+
+    }
+
+    utr_attempts[user] = 0
+
+    await context.bot.send_photo(
+
+        chat_id=user,
+        photo=InputFile(QR_FILE),
+
+        caption=f"""
+Coupon: {value}
+Qty: {qty}
+Total: ₹{total}
+
+Pay and press Paid button
+""",
+
+        reply_markup=InlineKeyboardMarkup([
+
+            [InlineKeyboardButton("Paid", callback_data="paid")],
+            [InlineKeyboardButton("Cancel Order", callback_data="cancel")]
+
+        ])
+
     )
 
-# ===== CUSTOM =====
-
-async def custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query=update.callback_query
-    await query.answer()
-
-    custom_wait[query.message.chat_id]=query.data.split("_")[1]
-
-    await query.message.reply_text("Send quantity")
-
-# ===== PAID =====
+# ---------------- PAID ----------------
 
 async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
+    query = update.callback_query
     await query.answer()
 
-    user=int(query.data.split("_")[1])
+    user = query.message.chat_id
 
-    utr_wait[user]=True
+    utr_waiting[user] = True
 
     await context.bot.send_message(
         user,
         "Send 12 digit UTR"
     )
 
-# ===== CANCEL =====
+# ---------------- TEXT ----------------
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
-    await query.answer()
+    user = update.message.chat_id
+    text = update.message.text.strip()
 
-    user=query.message.chat_id
-
-    pending.pop(user,None)
-
-    await query.message.reply_text("Order cancelled")
-
-# ===== TEXT =====
-
-async def text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user=update.message.chat_id
-    msg=update.message.text.strip()
-
-    if user in custom_wait:
-
-        value=custom_wait.pop(user)
-
-        await process_qty(user,value,int(msg),context)
-
+    if not utr_waiting.get(user):
         return
 
-    if not utr_wait.get(user):
+    if utr_attempts[user] >= MAX_UTR_ATTEMPTS:
+
+        await update.message.reply_text(
+            "Max attempts reached. Contact support."
+        )
         return
 
-    if utr_attempts[user]>=MAX_UTR_ATTEMPTS:
+    utr_attempts[user] += 1
 
-        await update.message.reply_text("Max attempts reached")
+    if not re.fullmatch(r"\d{12}", text):
+
+        await update.message.reply_text(
+            f"Invalid UTR\nAttempts left: {MAX_UTR_ATTEMPTS - utr_attempts[user]}"
+        )
         return
 
-    utr_attempts[user]+=1
+    if text in used_utrs:
 
-    if not re.fullmatch(r"\d{12}",msg):
-
-        await update.message.reply_text("Invalid UTR")
+        await update.message.reply_text(
+            "UTR already used"
+        )
         return
 
-    if msg in used_utrs:
+    used_utrs.add(text)
 
-        await update.message.reply_text("UTR already used")
-        return
+    keyboard = [
 
-    used_utrs.add(msg)
-    save_utr(msg)
+        [
 
-    keyboard=[[
-        InlineKeyboardButton("Approve",callback_data=f"approve_{user}"),
-        InlineKeyboardButton("Wrong",callback_data=f"wrong_{user}")
-    ]]
+            InlineKeyboardButton(
+                "Approve",
+                callback_data=f"approve_{user}"
+            ),
+
+            InlineKeyboardButton(
+                "Wrong",
+                callback_data=f"wrong_{user}"
+            )
+
+        ]
+
+    ]
 
     await context.bot.send_message(
+
         ADMIN_ID,
-        f"Payment\nUser:{user}\nUTR:{msg}",
+
+        f"User: {user}\nUTR: {text}",
+
         reply_markup=InlineKeyboardMarkup(keyboard)
+
     )
 
-# ===== APPROVE =====
+# ---------------- APPROVE ----------------
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
+    query = update.callback_query
     await query.answer()
 
-    user=int(query.data.split("_")[1])
+    user = int(query.data.split("_")[1])
 
-    value=pending[user]["value"]
-    qty=pending[user]["qty"]
+    order = pending_orders[user]
 
-    codes=coupon_db[value]["coupons"][:qty]
+    value = order["value"]
+    qty = order["qty"]
 
-    coupon_db[value]["coupons"]=coupon_db[value]["coupons"][qty:]
+    codes = coupon_db[value]["coupons"][:qty]
+
+    coupon_db[value]["coupons"] = coupon_db[value]["coupons"][qty:]
 
     await context.bot.send_message(
+
         user,
-        "Approved\n\n"+"\n".join(codes)
+
+        "Approved\n\n" + "\n".join(codes)
+
     )
 
-# ===== WRONG =====
+# ---------------- WRONG ----------------
 
 async def wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    query=update.callback_query
+    query = update.callback_query
     await query.answer()
 
-    user=int(query.data.split("_")[1])
-
-    utr_wait[user]=True
+    user = int(query.data.split("_")[1])
 
     await context.bot.send_message(
         user,
-        "Wrong UTR\nSend again"
+        "Wrong UTR. Send again."
     )
 
-# ===== MAIN =====
+# ---------------- CANCEL ----------------
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    user = query.message.chat_id
+
+    pending_orders.pop(user, None)
+
+    await context.bot.send_message(
+        user,
+        "Order cancelled"
+    )
+
+# ---------------- MAIN ----------------
+
+logging.basicConfig(level=logging.INFO)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-app.add_handler(CommandHandler("start",start))
+app.add_handler(CommandHandler("start", start))
 
-app.add_handler(CallbackQueryHandler(buy,pattern="buy_"))
-app.add_handler(CallbackQueryHandler(qty,pattern="qty_"))
-app.add_handler(CallbackQueryHandler(custom,pattern="custom_"))
-app.add_handler(CallbackQueryHandler(paid,pattern="paid_"))
-app.add_handler(CallbackQueryHandler(cancel,pattern="cancel"))
-app.add_handler(CallbackQueryHandler(approve,pattern="approve_"))
-app.add_handler(CallbackQueryHandler(wrong,pattern="wrong_"))
+app.add_handler(CallbackQueryHandler(buy, pattern="buy_"))
+app.add_handler(CallbackQueryHandler(qty, pattern="qty_"))
+app.add_handler(CallbackQueryHandler(paid, pattern="paid"))
+app.add_handler(CallbackQueryHandler(approve, pattern="approve_"))
+app.add_handler(CallbackQueryHandler(wrong, pattern="wrong_"))
+app.add_handler(CallbackQueryHandler(cancel, pattern="cancel"))
 
-app.add_handler(MessageHandler(filters.TEXT,text))
+app.add_handler(MessageHandler(filters.TEXT, text_handler))
 
-print("BOT RUNNING ON RENDER")
+print("BOT RUNNING 24/7")
 
 app.run_polling()
