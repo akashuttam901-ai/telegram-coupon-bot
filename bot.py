@@ -13,8 +13,8 @@ from telegram.ext import (
 
 # ---------------- CONFIG ----------------
 
-BOT_TOKEN = os.getenv("8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ")
-ADMIN_ID = int(os.getenv("7662708655"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 QR_FILE = "Screenshot_20260224_224442.jpg"
 
