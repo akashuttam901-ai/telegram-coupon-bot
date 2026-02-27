@@ -1,223 +1,351 @@
-import sqlite3
 import os
-import re
-from telegram import *
-from telegram.ext import *
+import sqlite3
+from telegram import (
+    Update, InlineKeyboardButton,
+    InlineKeyboardMarkup, ReplyKeyboardMarkup
+)
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler,
+    CallbackQueryHandler, MessageHandler,
+    ContextTypes, filters
+)
 
-BOT_TOKEN = os.getenv("8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ")
+TOKEN = os.getenv("8271855633:AAEOQ0ymg-NFiXHhIu2QtNC3dL_cWtmTwxQ")
 ADMIN_ID = int(os.getenv("7662708655"))
-SUPPORT = "https://t.me/Ark456781"
 
-# DATABASE
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+DB = "database.db"
+QR_FILE = "qr.jpg"
 
-cursor.execute("CREATE TABLE IF NOT EXISTS coupons(id INTEGER PRIMARY KEY, code TEXT UNIQUE, value TEXT, used INTEGER DEFAULT 0)")
-cursor.execute("CREATE TABLE IF NOT EXISTS utrs(utr TEXT UNIQUE)")
-cursor.execute("CREATE TABLE IF NOT EXISTS config(key TEXT UNIQUE, value TEXT)")
-cursor.execute("CREATE TABLE IF NOT EXISTS attempts(user INTEGER UNIQUE, count INTEGER DEFAULT 0)")
-cursor.execute("CREATE TABLE IF NOT EXISTS users(user INTEGER UNIQUE)")
+# ---------------- DATABASE ----------------
+
+conn = sqlite3.connect(DB, check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY)")
+cur.execute("CREATE TABLE IF NOT EXISTS coupons500 (code TEXT UNIQUE)")
+cur.execute("CREATE TABLE IF NOT EXISTS coupons1000 (code TEXT UNIQUE)")
+cur.execute("CREATE TABLE IF NOT EXISTS used_utrs (utr TEXT UNIQUE)")
+cur.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
 conn.commit()
 
-# ---------- START ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def get_setting(key, default):
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
 
-    user = update.message.from_user.id
-    cursor.execute("INSERT OR IGNORE INTO users VALUES(?)",(user,))
+def set_setting(key, value):
+    cur.execute("REPLACE INTO settings VALUES (?,?)", (key, str(value)))
     conn.commit()
 
-    keyboard = [
-        [InlineKeyboardButton("🛒 Buy Coupon", callback_data="buy")],
-        [InlineKeyboardButton("📞 Support", url=SUPPORT)]
-    ]
+# Default Prices
+if not get_setting("price500", None):
+    set_setting("price500", 20)
+if not get_setting("price1000", None):
+    set_setting("price1000", 110)
+
+# ---------------- START ----------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cur.execute("INSERT OR IGNORE INTO users VALUES (?)", (uid,))
+    conn.commit()
+
+    text = (
+        "⚠ Coupon apne risk me le\n"
+        "⚡ Instant use kare\n"
+        "❌ No replacement"
+    )
+
+    buttons = [["🛒 Buy Coupon"], ["📞 Support"]]
+
+    if uid == ADMIN_ID:
+        buttons.append(["⚙ Admin Panel"])
 
     await update.message.reply_text(
-        "Welcome to Coupon Bot",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        text,
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
     )
 
-# ---------- BUY ----------
-async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------- BUY SYSTEM ----------------
 
+async def buy(update: Update, context):
+    s500 = cur.execute("SELECT COUNT(*) FROM coupons500").fetchone()[0]
+    s1000 = cur.execute("SELECT COUNT(*) FROM coupons1000").fetchone()[0]
+
+    p500 = get_setting("price500", 20)
+    p1000 = get_setting("price1000", 110)
+
+    keyboard = []
+
+    if s500 > 0:
+        keyboard.append([InlineKeyboardButton(f"500₹ (₹{p500}) | Stock {s500}", callback_data="type_500")])
+    else:
+        keyboard.append([InlineKeyboardButton("❌ 500₹ Out of Stock", callback_data="none")])
+
+    if s1000 > 0:
+        keyboard.append([InlineKeyboardButton(f"1000₹ (₹{p1000}) | Stock {s1000}", callback_data="type_1000")])
+    else:
+        keyboard.append([InlineKeyboardButton("❌ 1000₹ Out of Stock", callback_data="none")])
+
+    await update.message.reply_text("Select Coupon Type",
+        reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ---------------- TYPE SELECT ----------------
+
+async def select_type(update: Update, context):
     query = update.callback_query
     await query.answer()
 
-    keyboard = [
-        [InlineKeyboardButton("500", callback_data="value_500")],
-        [InlineKeyboardButton("1000", callback_data="value_1000")],
-        [InlineKeyboardButton("2000", callback_data="value_2000")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
-    ]
-
-    await query.message.reply_text(
-        "Select Coupon Value",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ---------- QUANTITY ----------
-async def quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    value = query.data.split("_")[1]
-    context.user_data["value"] = value
+    context.user_data["type"] = query.data.split("_")[1]
 
     keyboard = [
         [InlineKeyboardButton("1", callback_data="qty_1"),
-         InlineKeyboardButton("2", callback_data="qty_2")],
-        [InlineKeyboardButton("5", callback_data="qty_5"),
-         InlineKeyboardButton("Custom", callback_data="custom")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
+         InlineKeyboardButton("2", callback_data="qty_2"),
+         InlineKeyboardButton("5", callback_data="qty_5")],
+        [InlineKeyboardButton("Custom", callback_data="qty_custom")]
     ]
 
-    await query.message.reply_text(
-        "Select Quantity",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.message.reply_text("Select Quantity",
+        reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ---------- SEND QR ----------
-async def send_qr(update, context, qty):
+# ---------------- QUANTITY ----------------
 
-    value = context.user_data["value"]
+async def select_qty(update: Update, context):
+    query = update.callback_query
+    await query.answer()
 
-    cursor.execute("SELECT value FROM config WHERE key='qr'")
-    qr = cursor.fetchone()
+    qty = query.data.split("_")[1]
 
-    cursor.execute("SELECT value FROM config WHERE key=?", (value,))
-    price = cursor.fetchone()
+    if qty == "custom":
+        context.user_data["custom"] = True
+        await query.message.reply_text("Send quantity number")
+        return
 
-    cursor.execute("SELECT COUNT(*) FROM coupons WHERE value=? AND used=0",(value,))
-    stock = cursor.fetchone()[0]
+    await show_payment(query.message, context, int(qty))
 
-    total = int(price[0]) * qty if price else 0
+async def custom_qty(update: Update, context):
+    if context.user_data.get("custom"):
+        qty = int(update.message.text)
+        context.user_data["custom"] = False
+        await show_payment(update.message, context, qty)
+
+# ---------------- PAYMENT ----------------
+
+async def show_payment(msg, context, qty):
+    ctype = context.user_data["type"]
+    price = int(get_setting(f"price{ctype}", 0))
+    total = price * qty
 
     context.user_data["qty"] = qty
 
-    await update.callback_query.message.reply_photo(
-        photo=open(qr[0],"rb"),
-        caption=f"""
-Coupon: {value}
-Price: ₹{price[0]}
-Qty: {qty}
-Total: ₹{total}
-Stock: {stock}
-
-Send 12 digit UTR
-"""
-    )
-
-# ---------- UTR ----------
-async def receive_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.message.from_user.id
-    utr = update.message.text.strip()
-
-    if not re.fullmatch(r"\d{12}", utr):
-        return
-
-    cursor.execute("SELECT * FROM utrs WHERE utr=?",(utr,))
-    if cursor.fetchone():
-        await update.message.reply_text("UTR already used")
-        return
-
-    cursor.execute("SELECT count FROM attempts WHERE user=?",(user,))
-    data = cursor.fetchone()
-
-    if data and data[0]>=5:
-        await update.message.reply_text("Max attempts reached")
-        return
-
-    cursor.execute("INSERT OR IGNORE INTO attempts VALUES(?,0)",(user,))
-    cursor.execute("UPDATE attempts SET count=count+1 WHERE user=?",(user,))
-    conn.commit()
-
-    value=context.user_data["value"]
-    qty=context.user_data["qty"]
-
-    keyboard=[
-        [InlineKeyboardButton("Approve",callback_data=f"approve_{user}_{utr}_{value}_{qty}")]
+    keyboard = [
+        [InlineKeyboardButton("Send UTR", callback_data="sendutr")]
     ]
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"User:{user}\nUTR:{utr}\nValue:{value}\nQty:{qty}",
+    await msg.reply_photo(
+        photo=open(QR_FILE, "rb"),
+        caption=f"Pay ₹{total} and send UTR",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-    await update.message.reply_text("Sent for admin approval")
+# ---------------- UTR ----------------
 
-# ---------- APPROVE ----------
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ask_utr(update: Update, context):
+    await update.callback_query.answer()
+    context.user_data["wait_utr"] = True
+    await update.callback_query.message.reply_text("Send 12 digit UTR")
 
-    query=update.callback_query
-    await query.answer()
-
-    _,user,utr,value,qty=query.data.split("_")
-    user=int(user)
-    qty=int(qty)
-
-    cursor.execute("INSERT INTO utrs VALUES(?)",(utr,))
-
-    cursor.execute("SELECT code FROM coupons WHERE value=? AND used=0 LIMIT ?",(value,qty))
-    coupons=cursor.fetchall()
-
-    codes=[]
-
-    for c in coupons:
-        codes.append(c[0])
-        cursor.execute("UPDATE coupons SET used=1 WHERE code=?",(c[0],))
-
-    conn.commit()
-
-    await context.bot.send_message(user,"\n".join(codes))
-    await query.message.reply_text("Approved")
-
-# ---------- ADMIN ----------
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.message.from_user.id!=ADMIN_ID:
+async def receive_utr(update: Update, context):
+    if not context.user_data.get("wait_utr"):
         return
 
-    keyboard=[
-        [InlineKeyboardButton("Set QR",callback_data="setqr")],
-        [InlineKeyboardButton("Set Price",callback_data="setprice")],
-        [InlineKeyboardButton("Add Coupon",callback_data="addcoupon")],
-        [InlineKeyboardButton("Stock",callback_data="stock")],
-        [InlineKeyboardButton("Broadcast",callback_data="broadcast")]
+    utr = update.message.text
+
+    if not utr.isdigit() or len(utr) != 12:
+        await update.message.reply_text("Invalid UTR")
+        return
+
+    try:
+        cur.execute("INSERT INTO used_utrs VALUES (?)", (utr,))
+        conn.commit()
+    except:
+        await update.message.reply_text("UTR already used")
+        return
+
+    context.user_data["wait_utr"] = False
+
+    user_id = update.effective_user.id
+    qty = context.user_data["qty"]
+    ctype = context.user_data["type"]
+
+    keyboard = [[
+        InlineKeyboardButton("Approve", callback_data=f"ok_{user_id}_{ctype}_{qty}"),
+        InlineKeyboardButton("Wrong", callback_data=f"bad_{user_id}")
+    ]]
+
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"Payment Received\nUser: {user_id}\nUTR: {utr}\nQty: {qty}\nType: {ctype}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    await update.message.reply_text("Waiting for admin approval")
+
+# ---------------- ADMIN CONFIRM ----------------
+
+async def confirm(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+
+    _, uid, ctype, qty = query.data.split("_")
+    uid = int(uid)
+    qty = int(qty)
+
+    table = f"coupons{ctype}"
+
+    available = cur.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    if available < qty:
+        await context.bot.send_message(uid, "❌ Out of Stock")
+        return
+
+    rows = cur.execute(f"SELECT code FROM {table} LIMIT ?", (qty,)).fetchall()
+    codes = [r[0] for r in rows]
+
+    for code in codes:
+        cur.execute(f"DELETE FROM {table} WHERE code=?", (code,))
+    conn.commit()
+
+    await context.bot.send_message(uid, "✅ Coupons:\n" + "\n".join(codes))
+
+async def wrong(update: Update, context):
+    await update.callback_query.answer()
+    uid = int(update.callback_query.data.split("_")[1])
+    await context.bot.send_message(uid, "Wrong UTR")
+
+# ---------------- ADMIN PANEL ----------------
+
+async def admin_panel(update: Update, context):
+    buttons = [
+        ["➕ Add 500 Coupon", "➕ Add 1000 Coupon"],
+        ["💰 Set Price 500", "💰 Set Price 1000"],
+        ["📦 Stock", "👥 Users"],
+        ["📢 Broadcast", "🖼 Set QR"]
     ]
+    await update.message.reply_text("Admin Panel",
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
 
-    await update.message.reply_text("Admin Panel",reply_markup=InlineKeyboardMarkup(keyboard))
+# -------- ADD COUPON --------
 
-# ---------- BUTTON ----------
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_coupon(update: Update, context):
+    if "500" in update.message.text:
+        context.user_data["add"] = "500"
+    else:
+        context.user_data["add"] = "1000"
+    await update.message.reply_text("Send coupons (one per line)")
 
-    data=update.callback_query.data
+async def save_coupon(update: Update, context):
+    if not context.user_data.get("add"):
+        return
 
-    if data=="buy":
-        await buy(update,context)
+    table = f"coupons{context.user_data['add']}"
+    lines = update.message.text.splitlines()
 
-    elif data.startswith("value_"):
-        await quantity(update,context)
+    for code in lines:
+        try:
+            cur.execute(f"INSERT INTO {table} VALUES (?)", (code.strip(),))
+        except:
+            pass
 
-    elif data.startswith("qty_"):
-        await send_qr(update,context,int(data.split("_")[1]))
+    conn.commit()
+    context.user_data["add"] = None
+    await update.message.reply_text("Coupons Added")
 
-    elif data=="cancel":
-        await update.callback_query.message.reply_text("Cancelled")
+# -------- SET PRICE --------
 
-    elif data.startswith("approve_"):
-        await approve(update,context)
+async def set_price(update: Update, context):
+    if "500" in update.message.text:
+        context.user_data["price"] = "price500"
+    else:
+        context.user_data["price"] = "price1000"
+    await update.message.reply_text("Send new price")
 
-# ---------- MAIN ----------
-app=ApplicationBuilder().token(BOT_TOKEN).build()
+async def save_price(update: Update, context):
+    key = context.user_data.get("price")
+    if key:
+        set_setting(key, update.message.text)
+        context.user_data["price"] = None
+        await update.message.reply_text("Price Updated")
 
-app.add_handler(CommandHandler("start",start))
-app.add_handler(CommandHandler("admin",admin))
+# -------- SET QR --------
 
-app.add_handler(CallbackQueryHandler(button))
+async def set_qr(update: Update, context):
+    context.user_data["qr"] = True
+    await update.message.reply_text("Send new QR photo")
 
-app.add_handler(MessageHandler(filters.TEXT,receive_utr))
+async def save_qr(update: Update, context):
+    if context.user_data.get("qr") and update.message.photo:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        await file.download_to_drive(QR_FILE)
+        context.user_data["qr"] = None
+        await update.message.reply_text("QR Updated")
 
-print("Bot Running")
+# -------- STOCK --------
+
+async def stock(update: Update, context):
+    s500 = cur.execute("SELECT COUNT(*) FROM coupons500").fetchone()[0]
+    s1000 = cur.execute("SELECT COUNT(*) FROM coupons1000").fetchone()[0]
+    await update.message.reply_text(f"500: {s500}\n1000: {s1000}")
+
+# -------- USERS --------
+
+async def users(update: Update, context):
+    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    await update.message.reply_text(f"Total Users: {total}")
+
+# -------- BROADCAST --------
+
+async def broadcast(update: Update, context):
+    context.user_data["broadcast"] = True
+    await update.message.reply_text("Send message to broadcast")
+
+async def send_broadcast(update: Update, context):
+    if context.user_data.get("broadcast"):
+        ids = cur.execute("SELECT id FROM users").fetchall()
+        for u in ids:
+            try:
+                await context.bot.send_message(u[0], update.message.text)
+            except:
+                pass
+        context.user_data["broadcast"] = False
+        await update.message.reply_text("Broadcast Sent")
+
+# ---------------- MAIN ----------------
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Buy Coupon"), buy))
+app.add_handler(CallbackQueryHandler(select_type, pattern="type_"))
+app.add_handler(CallbackQueryHandler(select_qty, pattern="qty_"))
+app.add_handler(CallbackQueryHandler(ask_utr, pattern="sendutr"))
+app.add_handler(CallbackQueryHandler(confirm, pattern="ok_"))
+app.add_handler(CallbackQueryHandler(wrong, pattern="bad_"))
+
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Admin Panel"), admin_panel))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Add"), add_coupon))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Set Price"), set_price))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Stock"), stock))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Users"), users))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Broadcast"), broadcast))
+app.add_handler(MessageHandler(filters.TEXT & filters.Regex("Set QR"), set_qr))
+
+app.add_handler(MessageHandler(filters.TEXT, save_coupon))
+app.add_handler(MessageHandler(filters.TEXT, save_price))
+app.add_handler(MessageHandler(filters.PHOTO, save_qr))
+app.add_handler(MessageHandler(filters.TEXT, receive_utr))
+app.add_handler(MessageHandler(filters.TEXT, custom_qty))
+app.add_handler(MessageHandler(filters.TEXT, send_broadcast))
+
 app.run_polling()
